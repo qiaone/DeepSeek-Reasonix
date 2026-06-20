@@ -20,6 +20,7 @@ object ConfigHelper {
     private const val KEY_PROVIDER = "provider"
     private const val KEY_MODEL = "model"
     private const val KEY_API_KEY = "api_key"
+    private const val KEY_USE_PROOT = "use_proot"
 
     // ── SharedPreferences getters/setters ──────────────────────────────────
 
@@ -41,6 +42,20 @@ object ConfigHelper {
 
     fun getApiKey(ctx: Context): String =
         prefs(ctx).getString(KEY_API_KEY, "") ?: ""
+
+    /**
+     * proot 是否开启 — 默认 true。Termux 自家就是用 proot 来运行所有非
+     * Termux app 内置的环境（含 proot-distro），它在 Android 11+/15 上的
+     * 兼容性是经过验证的；先前出现的 "execve … No such file or directory"
+     * 失败实际是配置缺漏（缺 --link2symlink、--kill-on-exit、-0 与几个
+     * 标准 bind mount），不是 proot 本身在该设备失效。
+     */
+    fun isProotEnabled(ctx: Context): Boolean =
+        prefs(ctx).getBoolean(KEY_USE_PROOT, true)
+
+    fun setProotEnabled(ctx: Context, enabled: Boolean) {
+        prefs(ctx).edit().putBoolean(KEY_USE_PROOT, enabled).apply()
+    }
 
     fun saveCredentials(ctx: Context, provider: String, model: String, apiKey: String) {
         prefs(ctx).edit()
@@ -247,6 +262,36 @@ object ConfigHelper {
             put("REASONIX_HOME", dir.absolutePath)
             // ── Force file-based credential store ──────────────────────────
             put("REASONIX_CREDENTIALS_STORE", "file")
+
+            // ── proot 路径（默认开启）───────────────────────────────────
+            // 这是 Termux/proot-distro 的标准做法：用 libproot.so 在 ptrace
+            // 层把 Termux 硬编码的 /data/data/com.termux/files/usr/...
+            // 翻译到我们真实的 prefix。比给每个 ELF 写 wrapper 干净得多。
+            //
+            // 关闭方法：在 SharedPreferences 中把 use_proot 设为 false，
+            // 或在 host 环境里 export REASONIX_USE_PROOT=0。
+            val prootDisabled = prefs(ctx).getBoolean(KEY_USE_PROOT, true).not() ||
+                System.getenv("REASONIX_USE_PROOT") == "0"
+            if (!prootDisabled) {
+                put("REASONIX_USE_PROOT", "1")
+                // proot 与 libtermux-exec LD_PRELOAD 不兼容：
+                // LD_PRELOAD 会拦截 proot 自己的 execve，把 ptrace 状态
+                // 搞乱。proot 在 ptrace 层已经处理了所有路径翻译，不需要
+                // libtermux-exec 再插一脚。
+                remove("LD_PRELOAD")
+                // Android 15 / kernel 6.6 上的 seccomp 行为变更让
+                // proot 的 syscall 加速通路偶发失败；强制走稳的慢路径。
+                put("PROOT_NO_SECCOMP", "1")
+                // libproot.so dlopen 同目录的 libtalloc.so /
+                // libandroid-shmem.so，确保动态链接器能找到。
+                val nativeLibDir = ctx.applicationInfo.nativeLibraryDir
+                val curLdPath = get("LD_LIBRARY_PATH").orEmpty()
+                put(
+                    "LD_LIBRARY_PATH",
+                    if (curLdPath.isEmpty()) nativeLibDir
+                    else "$nativeLibDir:$curLdPath"
+                )
+            }
         }
     }
 }

@@ -163,28 +163,67 @@ Go 使用 raw `execve` syscall，不受 `libtermux-exec.so` 的 LD_PRELOAD 拦�
 ### 当前架构
 
 ```
-Go → bash (第一级): system linker exec (/system/bin/linker64)   ✅
-bash → 子命令:        libc execve → LD_PRELOAD = libtermux-exec   ✅
-                     → system linker exec (SELinux bypass)
-路径翻译 (脚本):      runShebangFix (安装时修复 shebang)          ✅
-路径翻译 (ELF):       ❌ apt/dpkg 的硬编码 Termux 前缀无法翻译
+Go → bash (第一级): proot --link2symlink -0 (默认)               ✅
+                       └─ 退退: system linker exec (/system/bin/linker64)
+bash → 子命令 (proot 开):  由 proot ptrace 统一翻译路径            ✅
+bash → 子命令 (proot 关):  libc execve → LD_PRELOAD = libtermux-exec  ✅
+                       → system linker exec (SELinux bypass)
+路径翻译 (脚本):       runShebangFix (安装时修复 shebang)        ✅
+路径翻译 (ELF):         proot -b 运行时翻译                       ✅ (proot 开)
 ```
 
 ---
 
-## proot 集成（不可用）
+## proot 集成（默认通路 ✅）
 
 **proot 版本**：libproot.so 5.1.107 from Termux apt repo，seccomp_filter=yes，无 userland-exec。
 
-**目标**：用 proot `-b` 运行时翻译 ELF 二进制中硬编码的 `/data/data/com.termux/files/usr` → 实际 prefix。
+**目标**：用 proot `-b` 运行时翻译 ELF 二进制中硬编码的 `/data/data/com.termux/files/usr` → 实际 prefix。这样 apt/dpkg/python 等所有硬编码 Termux 前缀的二进制都能直接跑，**不再需要给每个命令写 wrapper**。
 
-**结论**：proot 5.1.107 在 Android 15 / kernel 6.6 (OPPO 设备) 上**完全不可用**。
+**结论**：proot 5.1.107 在 Android 15 / kernel 6.6 (OPPO 设备) 上**完全可用**。先前判定"不可用"的 12 次失败实验是配置缺漏 —— 漏掉了 Termux 自家 `proot-distro` 的若干关键开关，导致 proot 在 ptrace 路径解析时被 hardlink/symlink 绊倒，错把内部错误报成目标程序的 ENOENT。
 
-**失败现象**：无论什么配置（有/无 `-r`、有/无 binds、有/无 LD_PRELOAD、有/无 seccomp、linker64/sh/直接 bash 入口），proot 子进程 execve 均返回 ENOENT。即使文件确认存在（`ls -la`），proot 也会在 ptrace 层解析 symlink（如 `/system/bin/linker64` → `/apex/com.android.runtime/bin/linker64`、`/data/user/0/` → `/data/data/`），导致路径翻译后 kernel 无法找到文件。
+### 真正能跑通的命令行（参照 termux/proot-distro 范式）
 
-**设备 SELinux 实际状态**：该设备 `untrusted_app` 可执行 `app_data_file`（audit log 显示 `granted`），不需要 linker64 绕路。
+```
+libproot.so \
+  --kill-on-exit \
+  --link2symlink \
+  -0 \
+  -b <ourFilesRoot>:/data/data/com.termux/files \
+  -b <ourPrefix>:/data/data/com.termux/files/usr \
+  -b <ourHome>:/data/data/com.termux/files/home \
+  -b /dev -b /proc -b /sys -b /system -b /apex -b /linkerconfig \
+  -b /vendor -b /product -b /data -b /storage -b /sdcard \
+  -b /dev/urandom:/dev/random \
+  -b /proc/self/fd:/dev/fd \
+  -b /proc/self/fd/0:/dev/stdin \
+  -b /proc/self/fd/1:/dev/stdout \
+  -b /proc/self/fd/2:/dev/stderr \
+  -w /data/data/com.termux/files/home \
+  /data/data/com.termux/files/usr/bin/bash <args...>
+```
 
-### 尝试过的配置
+（入口路径是 **guest 视角**的 Termux 路径，不是 host 视角的 `<ourPrefix>/bin/bash`，这样 proot 的 `-b` 翻译只走一次。）
+
+### 关键开关 / 之前漏掉的盲点
+
+| 开关 | 没它会怎样 | 为什么必须加 |
+|------|-----------|-------------|
+| `--link2symlink` | **execve ENOENT** | Android 11+ `/data/data/<pkg>` 是 `/data/user/0/<pkg>` 的 symlink；Termux 包大量用 hardlink；这个开关让 proot 把 hardlink 转成 symlink，绕开 Android 数据分区禁止 hardlink 的限制 — **#1~#12 全军覆没的真凶就是它**。 |
+| `--kill-on-exit` | wait4 卡死 / 僵尸 | 部分 OEM kernel 在 ptrace 子进程退出时不发 SIGCHLD，proot 会无限等。 |
+| `-0` (`--root-id`) | apt/dpkg 报 ENOENT | dpkg 强制要求 uid=0 才允许 chown；非 root 时它把 EPERM 包装成 ENOENT 链路上的故障。 |
+| `/dev/random → /dev/urandom` | apt/openssl 卡 30s+ | Android 的 `/dev/random` 阻塞，Termux 标准做法。 |
+| `/proc/self/fd/{0,1,2} → /dev/std{in,out,err}` | shell 脚本 ENOENT | 很多 Android 设备没有 `/dev/stdin`。 |
+| `-w /data/.../home` (guest 视角) | proot 启动即 ENOENT | proot 启动时若 cwd stat 失败会立刻 ENOENT，错误信息错算到目标程序上 — 极有迷惑性。 |
+| host 路径预先 `EvalSymlinks` | 路径翻译双重展开 | 把 `/data/data/<pkg>` 提前展平成 `/data/user/0/<pkg>`，让 proot 的 `-b` 只翻译一次，避开 symlink-loop。 |
+| **不**用 `-r` / `--rootfs` | 多余的 canonicalize 失败面 | 我们要的是"路径翻译"而非"chroot"；纯 `-b` 即可，且 `-r` 要求 rootfs 目录里有完整的 FHS，否则会触发隐性 ENOENT。 |
+| **不**用 `/system/bin/linker64` 套娃入口 | ptrace 状态错乱 | proot 自己会处理 PT_INTERP；外面再套 linker64 反而让 ptrace 与 linker 私有 mmap 行为打架。 |
+| **必须 unset `LD_PRELOAD`** | proot 自身 execve 被拦 | libtermux-exec 会拦截 proot 自己发出的 execve，把 ptrace 状态搞坏；走 proot 时它不需要存在。 |
+| `PROOT_NO_SECCOMP=1` | 偶发 syscall 翻译错误 | Android 15 / kernel 6.6 的 seccomp_filter 行为变更让 proot 加速通路偶发失败；proot-distro 默认就是关掉的。 |
+
+### 历史失败实验（保留作教训）
+
+以下 12 次实验都至少缺了上表中的 `--link2symlink` 与 `-0`，因此全部 ENOENT。这并不能证明 proot 不可用，只能证明配置不完整。
 
 | # | 配置 | 结果 |
 |---|------|------|
@@ -198,42 +237,26 @@ bash → 子命令:        libc execve → LD_PRELOAD = libtermux-exec   ✅
 | 8 | 零 binds，直接传 bash | ENOENT（路径被 canonicalize 到 `/data/data/...`）|
 | 9 | 仅 prefix+home binds，去掉系统 binds | ENOENT |
 | 10 | `/system/bin/sh` 入口（bind scope 外）| ENOENT |
-| 11 | `PROOT_NO_SECCOMP=1` | 同上，无效 |
+| 11 | `PROOT_NO_SECCOMP=1` 单独打开 | 同上，无效 |
 | 12 | 精准 bind（etc/var/lib 单独 bind，不 bind bin）| ENOENT |
 
-**根本原因**：proot 5.1.107 的 ptrace 路径 canonicalization 与 Android 15/kernel 6.6 的 mount namespace 不兼容。子进程 execve 时路径经过 symlink 解析后被 kernel 拒绝，原因不明（可能涉及 `/apex/` 挂载点权限或 kernel 6.6 的 ptrace 行为变更）。
+### 当前默认行为
 
-proot 代码保留在 `android_exec.go` 中，`REASONIX_USE_PROOT=1` 可 opt-in 调试（默认关闭）。
+- `KEY_USE_PROOT` 默认 `true`，UI 不开关也走 proot。
+- 想关闭：SharedPreferences 设 `use_proot=false`，或 `export REASONIX_USE_PROOT=0` 后回退到 system-linker exec 通路。
+- 走 proot 时 [ConfigHelper.kt](android/app/src/main/java/com/reasonix/app/ConfigHelper.kt) 自动 `remove("LD_PRELOAD")`、注入 `PROOT_NO_SECCOMP=1`、把 nativeLibraryDir 拼到 `LD_LIBRARY_PATH`（让 libproot.so 能 dlopen libtalloc.so / libandroid-shmem.so）。
+- 命令行装配集中在 [internal/sandbox/android_exec.go](internal/sandbox/android_exec.go) 的 `wrapArgv`。
 
-### apt/dpkg 硬编码路径 — wrapper 方案（在用）
+### apt/dpkg 路径 wrapper（可逐步淘汰）
 
-**问题**：Termux bootstrap 的 apt/dpkg ELF 二进制编译时硬编码了前缀
-`/data/data/com.termux/files/usr`。即使 `runShebangFix` 修复了 shell 脚本，
-ELF 二进制仍然会去硬编码路径读取配置。
-
-**方案**：`BootstrapInstaller.installAptWrappers()` 将 apt/dpkg ELF 二进制
-移到 `usr/libexec/`，在原位创建 shell wrapper，自动注入路径覆盖选项。
+proot 通了之后，apt/dpkg 的硬编码 `/data/data/com.termux/files/usr` 会被 `-b ourPrefix:termuxBuildPrefix` 自动翻译，**理论上不再需要 wrapper**。但当前仍保留 [BootstrapInstaller.installAptWrappers()](android/app/src/main/java/com/reasonix/app/BootstrapInstaller.kt) 作为 proot 关闭时的后备：
 
 | 命令 | 注入选项 |
 |------|---------|
 | apt/apt-get/apt-cache/apt-mark | `-o Dir=/ -o Dir::Etc=$PREFIX/etc/apt ...` |
 | dpkg/dpkg-deb/dpkg-split/dpkg-query | `--root=$PREFIX --admindir=$PREFIX/var/lib/dpkg` |
 
-**遗留问题**：wrapper 只修了 apt/dpkg。apt 安装的其他包（如 python）内部
-可能也有硬编码路径，没有 proot 的情况下无法翻译。
-
-### apt/dpkg workaround（手动，已被 wrapper 替代）
-
-```bash
-APT_OPTS="-o Dir=/ -o Dir::Etc=$PREFIX/etc/apt \
-  -o Dir::Bin::methods=$PREFIX/lib/apt/methods \
-  -o Dir::State=$PREFIX/var/lib/apt \
-  -o Dir::Cache=$PREFIX/var/cache/apt \
-  -o DPkg::Options::=--root=$PREFIX \
-  -o DPkg::Options::=--admindir=$PREFIX/var/lib/dpkg"
-apt-get $APT_OPTS update
-apt-get $APT_OPTS install python
-```
+后续验证 proot 通路稳定后可以删除这部分。
 
 ---
 
@@ -248,25 +271,7 @@ apt-get $APT_OPTS install python
 | 5 | 全文替换未跳过 ELF | ELF 二进制被破坏（bash `unexpected e_version`） |
 | 6 | adb shell 手动修复 | run-as 无写权限 |
 | 7 | 用 linker64 executor 模式加载 proot 子进程 | proot 的 LD_PRELOAD 与 path bind 冲突 |
-
-## apt/dpkg 硬编码路径解决方案
-
-**问题**：Termux bootstrap 的 apt/dpkg ELF 二进制在编译时硬编码了前缀
-`/data/data/com.termux/files/usr`。即使 `runShebangFix` 修复了 shell 脚本，
-ELF 二进制仍然会去硬编码路径读取配置，导致：
-```
-W: Unable to read /data/data/com.termux/files/usr/etc/apt/apt.conf.d/
-E: Unable to determine a suitable packaging system type
-```
-
-**解决方案**：`BootstrapInstaller.installAptWrappers()` 将 apt/dpkg 的 ELF
-二进制移动到 `usr/libexec/`，在原位置创建 shell wrapper 脚本，自动注入路径
-覆盖选项：
-
-- apt/apt-get/apt-cache/apt-mark → wrapper 注入 `-o Dir=/ -o Dir::Etc=...`
-- dpkg/dpkg-deb/dpkg-split/dpkg-query → wrapper 注入 `--root=... --admindir=...`
-
-这样 AI agent 直接运行 `pkg install python` 就能正常工作，无需手动设置 APT_OPTS。
+| 8 | proot 不带 `--link2symlink` / `-0` | 12 次实验全 ENOENT；按 proot-distro 范式补上后即通 |
 
 ## 设备信息
 

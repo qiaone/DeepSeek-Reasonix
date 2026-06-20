@@ -90,6 +90,53 @@ object BootstrapInstaller {
                 Log.w(TAG, "Failed to copy $name: ${e.message}")
             }
         }
+
+        // Drop a "ld-android.so" stub in usr/lib/ that points at the system
+        // dynamic linker.  Termux ELFs (bash, ls, apt, …) carry PT_INTERP =
+        // /data/data/com.termux/files/usr/lib/ld-android.so .  Without this
+        // stub the kernel returns ENOENT on every execve of a Termux ELF
+        // (proot's "No such file or directory" error usually originates
+        //  from the missing interpreter, not the target binary).
+        installLdInterpreter(libDir)
+    }
+
+    /**
+     * Creates filesDir/usr/lib/ld-android.so as a symlink (preferred) or
+     * copy of /system/bin/linker64 — the Android bionic dynamic linker.
+     *
+     * Android's linker64 is itself a valid ELF interpreter, so any Termux
+     * ELF whose PT_INTERP resolves to this file will load successfully.
+     */
+    private fun installLdInterpreter(libDir: File) {
+        val linker = listOf("/system/bin/linker64", "/system/bin/linker")
+            .map { File(it) }
+            .firstOrNull { it.exists() } ?: run {
+                Log.w(TAG, "No system linker found — Termux ELFs may fail PT_INTERP resolution")
+                return
+            }
+        val ldStub = File(libDir, "ld-android.so")
+        if (ldStub.exists()) {
+            // Already installed — skip.  We don't try to keep it in sync;
+            // the system linker's path is stable across boots on a given
+            // device, so a one-time install is enough.
+            return
+        }
+        try {
+            java.nio.file.Files.createSymbolicLink(
+                ldStub.toPath(),
+                linker.toPath()
+            )
+            Log.i(TAG, "Symlinked ld-android.so -> ${linker.absolutePath}")
+        } catch (e: Exception) {
+            // Symlink may fail on some filesystems; fall back to copy.
+            try {
+                linker.copyTo(ldStub, overwrite = true)
+                ldStub.setExecutable(true, false)
+                Log.i(TAG, "Copied ld-android.so from ${linker.absolutePath}")
+            } catch (e2: Exception) {
+                Log.w(TAG, "Failed to install ld-android.so: ${e2.message}")
+            }
+        }
     }
 
     // ── Shebang fix ───────────────────────────────────────────────────────
