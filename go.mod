@@ -16,7 +16,9 @@ require (
 	github.com/mattn/go-runewidth v0.0.24
 	github.com/sabhiram/go-gitignore v0.0.0-20210923224102-525f6e181f06
 	github.com/yuin/goldmark v1.8.2
+	github.com/zalando/go-keyring v0.2.8
 	go.uber.org/goleak v1.3.0
+	golang.org/x/crypto v0.53.0
 	golang.org/x/image v0.42.0
 	golang.org/x/mod v0.37.0
 	golang.org/x/net v0.56.0
@@ -42,6 +44,5 @@ require (
 	github.com/muesli/cancelreader v0.2.2 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
-	github.com/zalando/go-keyring v0.2.8 // indirect
 	golang.org/x/sync v0.21.0 // indirect
 )
