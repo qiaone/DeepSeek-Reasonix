@@ -282,6 +282,13 @@ object ConfigHelper {
                 // Android 15 / kernel 6.6 上的 seccomp 行为变更让
                 // proot 的 syscall 加速通路偶发失败；强制走稳的慢路径。
                 put("PROOT_NO_SECCOMP", "1")
+                // proot 自己用的 tmpdir：默认放 cacheDir/proot-tmp。
+                // OPPO/ColorOS Android 15 对 filesDir 子路径的 chdir
+                // 会被 fortify hook 成 ENOSYS（"Function not implemented"），
+                // 而 cacheDir 不在该黑名单里。Service 层会再覆盖一次以保证
+                // 目录已经 mkdir。
+                val prootTmp = File(ctx.cacheDir, "proot-tmp").apply { mkdirs() }
+                put("REASONIX_PROOT_TMPDIR", prootTmp.absolutePath)
                 // libproot.so dlopen 同目录的 libtalloc.so /
                 // libandroid-shmem.so，确保动态链接器能找到。
                 val nativeLibDir = ctx.applicationInfo.nativeLibraryDir

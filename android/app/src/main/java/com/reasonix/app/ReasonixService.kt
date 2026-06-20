@@ -141,7 +141,10 @@ class ReasonixService : Service() {
             // Create tmp dirs if they don't exist
             File(dir, "tmp").mkdirs()
             File(dir, "usr/tmp").mkdirs()
-            File(dir, "home").mkdirs()
+            val homeDir = File(dir, "home").apply { mkdirs() }
+            // proot 自身的 tmpdir：放到 cacheDir 下，避开 OPPO/ColorOS
+            // 对 filesDir 子路径 chdir 的 fortify ENOSYS 限制。
+            val prootTmpDir = File(cacheDir, "proot-tmp").apply { mkdirs() }
 
             val pb = ProcessBuilder(
                 binary.absolutePath,
@@ -149,8 +152,12 @@ class ReasonixService : Service() {
                 "--addr", SERVER_ADDR,
                 "--auth", "none"
             )
-            pb.directory(dir)
+            // 关键：把 Go 进程 cwd 设到 home 而不是 filesDir 根。
+            // proot 会沿用这个 cwd，不再调 chdir，避开 ENOSYS。
+            pb.directory(homeDir)
             pb.environment().putAll(env)
+            // 透传 PROOT 用的 tmpdir（android_exec.go 的 wrapArgv 会读）
+            pb.environment()["REASONIX_PROOT_TMPDIR"] = prootTmpDir.absolutePath
             // Redirect stderr to a log file for debugging
             val logFile = File(dir, "reasonix.log")
             pb.redirectError(ProcessBuilder.Redirect.appendTo(logFile))

@@ -197,13 +197,16 @@ libproot.so \
   -b /dev/urandom:/dev/random \
   -b /proc/self/fd:/dev/fd \
   -b /proc/self/fd/0:/dev/stdin \
-  -b /proc/self/fd/1:/dev/stdout \
-  -b /proc/self/fd/2:/dev/stderr \
-  -w /data/data/com.termux/files/home \
   /data/data/com.termux/files/usr/bin/bash <args...>
 ```
 
 （入口路径是 **guest 视角**的 Termux 路径，不是 host 视角的 `<ourPrefix>/bin/bash`，这样 proot 的 `-b` 翻译只走一次。）
+
+**注意（Android 15 / OPPO ColorOS）**：
+
+- **不**给 proot 传 `-w`：会触发 `chdir ... Function not implemented`（fortify_chdir hook，把 app 私有目录子路径的 chdir 当 ENOSYS 拒绝）。改由 [ReasonixService.kt](android/app/src/main/java/com/reasonix/app/ReasonixService.kt) 在 `ProcessBuilder.directory(filesDir/home)` 把 Go 进程 cwd 设到 home，proot 沿用继承 cwd。
+- **不**绑 `/proc/self/fd/1` 与 `/proc/self/fd/2`：在 Foreground Service 里 stdout/stderr 已被 `redirectError/Output` 接到 log 文件，proot 启动期 stat 这俩 fd 会触发 "can't sanitize binding" warning 并干扰后续 path-translation。脚本要 stdout/stderr 时直接读 `/proc/self/fd/1` 即可。
+- `PROOT_TMP_DIR` 改放 **`cacheDir/proot-tmp`**：默认值 `$PREFIX/tmp/proot` 同样落在 filesDir 子树，会因 `chdir ENOSYS` 让 proot 启动失败。Service 在启动时 `mkdir cacheDir/proot-tmp` 并通过 `REASONIX_PROOT_TMPDIR` 透传，[android_exec.go](internal/sandbox/android_exec.go) 的 `configureProotEnv` 优先用它。
 
 ### 关键开关 / 之前漏掉的盲点
 
@@ -213,8 +216,9 @@ libproot.so \
 | `--kill-on-exit` | wait4 卡死 / 僵尸 | 部分 OEM kernel 在 ptrace 子进程退出时不发 SIGCHLD，proot 会无限等。 |
 | `-0` (`--root-id`) | apt/dpkg 报 ENOENT | dpkg 强制要求 uid=0 才允许 chown；非 root 时它把 EPERM 包装成 ENOENT 链路上的故障。 |
 | `/dev/random → /dev/urandom` | apt/openssl 卡 30s+ | Android 的 `/dev/random` 阻塞，Termux 标准做法。 |
-| `/proc/self/fd/{0,1,2} → /dev/std{in,out,err}` | shell 脚本 ENOENT | 很多 Android 设备没有 `/dev/stdin`。 |
-| `-w /data/.../home` (guest 视角) | proot 启动即 ENOENT | proot 启动时若 cwd stat 失败会立刻 ENOENT，错误信息错算到目标程序上 — 极有迷惑性。 |
+| `/proc/self/fd:/dev/fd` + `fd/0:/dev/stdin` | shell 脚本 ENOENT | 很多 Android 设备没有 `/dev/stdin`。**只绑 fd 与 fd/0**，fd/1 / fd/2 在 Service 上下文会让 proot warn "can't sanitize binding" 并干扰 path-translation。 |
+| **不**给 `-w` | `chdir ... Function not implemented` (ENOSYS) | OPPO/ColorOS Android 15 fortify_chdir hook 把 app 私有目录子路径 chdir 拒成 ENOSYS。改由 Service 启动 Go 进程时设 cwd=`filesDir/home`，proot 继承即可。 |
+| `PROOT_TMP_DIR=cacheDir/proot-tmp` | `chdir … ENOSYS` | 同上 — `$PREFIX/tmp/proot` 也在 filesDir 子树，命中 fortify 黑名单。cacheDir 不在黑名单。 |
 | host 路径预先 `EvalSymlinks` | 路径翻译双重展开 | 把 `/data/data/<pkg>` 提前展平成 `/data/user/0/<pkg>`，让 proot 的 `-b` 只翻译一次，避开 symlink-loop。 |
 | **不**用 `-r` / `--rootfs` | 多余的 canonicalize 失败面 | 我们要的是"路径翻译"而非"chroot"；纯 `-b` 即可，且 `-r` 要求 rootfs 目录里有完整的 FHS，否则会触发隐性 ENOENT。 |
 | **不**用 `/system/bin/linker64` 套娃入口 | ptrace 状态错乱 | proot 自己会处理 PT_INTERP；外面再套 linker64 反而让 ptrace 与 linker 私有 mmap 行为打架。 |
@@ -239,6 +243,8 @@ libproot.so \
 | 10 | `/system/bin/sh` 入口（bind scope 外）| ENOENT |
 | 11 | `PROOT_NO_SECCOMP=1` 单独打开 | 同上，无效 |
 | 12 | 精准 bind（etc/var/lib 单独 bind，不 bind bin）| ENOENT |
+| 13 | proot-distro 范式（--link2symlink/-0/--kill-on-exit/`-w guest-home`/`PROOT_TMP_DIR=$PREFIX/tmp/proot`）| `proot error: can't chdir to '/data/data/com.reasonix.app/files/usr/tmp/proot/proot-…': Function not implemented` —— OPPO/ColorOS Android 15 fortify_chdir 把 app 私有目录子路径 chdir 拒成 ENOSYS；解法见 #14 |
+| 14 | 同 13 但 **去掉 `-w`** + `PROOT_TMP_DIR=cacheDir/proot-tmp` + Service 设 Go cwd=`filesDir/home` + 不绑 `/proc/self/fd/{1,2}` | 通过 ✅（chdir ENOSYS 全部消失） |
 
 ### 当前默认行为
 
@@ -272,6 +278,7 @@ proot 通了之后，apt/dpkg 的硬编码 `/data/data/com.termux/files/usr` 会
 | 6 | adb shell 手动修复 | run-as 无写权限 |
 | 7 | 用 linker64 executor 模式加载 proot 子进程 | proot 的 LD_PRELOAD 与 path bind 冲突 |
 | 8 | proot 不带 `--link2symlink` / `-0` | 12 次实验全 ENOENT；按 proot-distro 范式补上后即通 |
+| 9 | proot 加上 `-w guest-home` 与 `PROOT_TMP_DIR=$PREFIX/tmp/proot` | OPPO/ColorOS Android 15 fortify_chdir 把 app 私有目录子路径的 chdir 拒成 ENOSYS。改成不传 `-w` + tmp 放 `cacheDir/proot-tmp` + Go 进程 cwd=`filesDir/home` 即通 |
 
 ## 设备信息
 

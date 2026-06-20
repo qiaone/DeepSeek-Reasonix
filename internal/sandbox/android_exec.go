@@ -32,10 +32,18 @@ const (
 //	      -b /dev/urandom:/dev/random \
 //	      -b /proc/self/fd:/dev/fd \
 //	      -b /proc/self/fd/0:/dev/stdin \
-//	      -b /proc/self/fd/1:/dev/stdout \
-//	      -b /proc/self/fd/2:/dev/stderr \
-//	      -w <termuxBuildHome> \
 //	      <bash> <args...>
+//
+// 注意我们**不**给 proot 传 -w：Foreground Service 上下文中 chdir
+// 到 app 私有目录（/data/data/<pkg>/files/...）在某些 OEM 内核
+// (OPPO ColorOS / Android 15) 会被 fortify_chdir hook 成 ENOSYS
+// (\"Function not implemented\")。Termux 终端进程本身 cwd 就在
+// home 里，proot 沿用继承 cwd 就 OK。我们这边由 ReasonixService.kt
+// 把 ProcessBuilder.directory(filesDir/home) 设好。
+//
+// 同样原因，PROOT_TMP_DIR 改用 cacheDir 下的目录（Kotlin 层透传
+// REASONIX_PROOT_TMPDIR）；之前默认放在 filesDir/usr/tmp/proot
+// 也会触发 chdir ENOSYS。
 //
 // 关键点（之前 AGENTS.md 里 #1~#12 全失败的真正原因）：
 //
@@ -137,16 +145,31 @@ func wrapArgv(argv []string) []string {
 	}
 	// /dev/std{in,out,err} 在很多 Android 设备上不存在或不可读，
 	// 用 /proc/self/fd/N 兜底。
+	//
+	// 注意：在 Foreground Service 上下文里，fd 1/2 已经被
+	// ProcessBuilder.redirectError/Output 重定向到 log 文件，对它们
+	// 做 -b /proc/self/fd/{1,2}:/dev/std{out,err} 时 proot 在启动期
+	// stat /proc/self/fd/{1,2} 会拿到一个普通文件 inode；这本身能 work，
+	// 但部分 Android 内核（OPPO ColorOS/Android 15）在跨 fd 树 stat 时
+	// 返回 ENOENT 触发 "can't sanitize binding" warning，进而干扰
+	// 后续 path-translation。这里只保留 fd:/dev/fd 和 fd/0:/dev/stdin —
+	// 真要 stdout/stderr 时脚本可以直接读 /proc/self/fd/1。
 	out = append(out,
 		"-b", "/proc/self/fd:/dev/fd",
 		"-b", "/proc/self/fd/0:/dev/stdin",
-		"-b", "/proc/self/fd/1:/dev/stdout",
-		"-b", "/proc/self/fd/2:/dev/stderr",
 	)
 
-	// 工作目录：进入 guest 视角的 $HOME，避免落在一个 stat 失败的目录上
-	// （proot 启动时若 cwd 无效会立即 ENOENT，并把错误信息错算到目标）。
-	out = append(out, "-w", termuxBuildHome)
+	// 工作目录：**不**给 proot 传 -w。
+	//
+	// 之前传 -w /data/data/com.termux/files/home 在 OPPO/ColorOS
+	// (Android 15, kernel 6.6) 上会触发 "can't chdir … Function not
+	// implemented" — 这是 fortify_chdir hook 对 app 私有目录子路径
+	// 返回 ENOSYS（不是 SELinux 的 EACCES），Termux 自家进程绕过它
+	// 的方式是让父进程（终端 shell）启动时就以 home 为 cwd，proot
+	// 直接继承，从不调 chdir。
+	//
+	// 我们靠 ReasonixService.kt 在 ProcessBuilder.directory(filesDir/home)
+	// 把 Go 进程 cwd 设到 home，proot 沿用即可，不需要 -w。
 
 	// ── proot 自身运行环境 ───────────────────────────────────────────
 	configureProotEnv(proot, ourPrefix)
@@ -199,11 +222,19 @@ func configureProotEnv(proot, ourPrefix string) {
 	}
 
 	// proot 需要一个可写的 tmpdir 存中间状态。
-	tmpDir := os.Getenv("TMPDIR")
-	if tmpDir == "" {
-		tmpDir = ourPrefix + "/tmp"
+	//
+	// 重要：在 OPPO/ColorOS (Android 15) 上对 filesDir/usr/tmp 子路径
+	// 调用 chdir() 会返 ENOSYS（fortify_chdir hook），所以**优先**使用
+	// Android 应用 cacheDir 下的目录（由 Kotlin 层透传 REASONIX_PROOT_TMPDIR）。
+	// 实测 cacheDir 子路径不在 fortify 黑名单里。
+	prootTmp := os.Getenv("REASONIX_PROOT_TMPDIR")
+	if prootTmp == "" {
+		tmpDir := os.Getenv("TMPDIR")
+		if tmpDir == "" {
+			tmpDir = ourPrefix + "/tmp"
+		}
+		prootTmp = filepath.Join(tmpDir, "proot")
 	}
-	prootTmp := filepath.Join(tmpDir, "proot")
 	_ = os.MkdirAll(prootTmp, 0755)
 	_ = os.Setenv("PROOT_TMP_DIR", prootTmp)
 
