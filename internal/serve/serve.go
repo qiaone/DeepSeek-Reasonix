@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -382,7 +383,7 @@ func (s *Server) submit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	trimmed := strings.TrimSpace(body.Input)
-	if strings.HasPrefix(trimmed, "!") {
+	if strings.HasPrefix(trimmed, "!") && runtime.GOOS != "android" {
 		http.Error(w, "shell commands are unavailable over HTTP", http.StatusForbidden)
 		return
 	}

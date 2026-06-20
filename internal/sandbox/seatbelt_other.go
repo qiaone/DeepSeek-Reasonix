@@ -13,17 +13,20 @@ import "os/exec"
 // macOS Seatbelt: writes confined to WriteRoots, network denied unless
 // spec.Network is true. When bwrap is unavailable the command runs unconfined
 // (boot and acp warn about this once at startup).
+//
+// On Android, wrapArgv prepends /system/bin/linker64 so binaries from
+// filesDir can be executed despite SELinux (system linker exec).
 func Command(spec Spec, sh Shell, command string) ([]string, bool) {
 	if !spec.enforce() {
-		return sh.argv(command), false
+		return wrapArgv(sh.argv(command)), false
 	}
 	if bwrap, err := exec.LookPath("bwrap"); err == nil {
 		argv := append([]string{bwrap}, bwrapArgs(spec, sh, command)...)
-		return argv, true
+		return wrapArgv(argv), true
 	}
 	// enforce requested but bwrap unavailable — boot/acp already warned at
 	// startup; fall back to unconfined (the false result signals "not sandboxed").
-	return sh.argv(command), false
+	return wrapArgv(sh.argv(command)), false
 }
 
 // Available reports whether an OS sandbox is available on this platform.

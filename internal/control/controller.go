@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -1048,7 +1049,7 @@ func (c *Controller) submitHTTP(input, display string) {
 	if c.applyGoalCommand(trimmed, display) {
 		return
 	}
-	if strings.HasPrefix(trimmed, "!") {
+	if strings.HasPrefix(trimmed, "!") && runtime.GOOS != "android" {
 		c.notice("shell commands are unavailable from this frontend")
 		return
 	}

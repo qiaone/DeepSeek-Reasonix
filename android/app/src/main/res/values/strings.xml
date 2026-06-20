@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Reasonix</string>
+    <string name="channel_name">Reasonix Server</string>
+    <string name="channel_description">Keeps the Reasonix agent server running</string>
+    <string name="notification_running">Reasonix server is running on port 8787</string>
+    <string name="loading">Starting Reasonix server…</string>
+    <string name="error_server_unreachable">Could not connect to Reasonix server.\n\nPlease ensure the service is running.</string>
+    <string name="retry">Retry</string>
+    <string name="setup_title">Welcome to Reasonix</string>
+    <string name="setup_subtitle">Enter your API key to get started</string>
+    <string name="setup_provider_label">Provider</string>
+    <string name="setup_model_label">Model</string>
+    <string name="setup_key_label">API Key</string>
+    <string name="setup_key_hint">sk-… or your provider key</string>
+    <string name="setup_start">Start</string>
+    <string name="setup_error">Please fill in all required fields</string>
+    <string name="setup_skip">Skip (configure later)</string>
+    <string name="pref_first_launch">first_launch</string>
+    <string name="pref_provider">provider</string>
+    <string name="pref_model">model</string>
+</resources>
