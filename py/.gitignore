@@ -1,0 +1,36 @@
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Packaging / build artifacts
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Virtual envs (project-local)
+.venv/
+venv/
+env/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Reasonix-py runtime artifacts
+serve.pid
+serve.log
+*.log
+
+# Example outputs produced when running smoke tests
+今天的天气.txt

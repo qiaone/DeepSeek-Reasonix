@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reasonix-py"
+version = "0.0.1"
+description = "Minimal Python port of the Reasonix coding-agent kernel."
+requires-python = ">=3.10"
+authors = [{ name = "reasonix-py" }]
+license = { text = "MIT" }
+readme = "README.md"
+dependencies = [
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+serve = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+]
+dev = [
+    "pytest>=8.0",
+    "python-dotenv>=1.0",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+]
+
+[project.scripts]
+reasonix-py = "reasonix_py.__main__:main"
+reasonix-py-serve = "reasonix_py.serve:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["reasonix_py*"]
